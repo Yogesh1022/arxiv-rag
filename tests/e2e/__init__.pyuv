@@ -1,0 +1,1 @@
+  add fastapi uvicorn[standard] pydantic pydantic-settings sqlalchemy asyncpg psycopg2-binary
