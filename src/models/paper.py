@@ -1,13 +1,13 @@
 """Paper domain models."""
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, HttpUrl
 
 
-class ParsingStatus(str, Enum):
+class ParsingStatus(str, StrEnum):
     PENDING = "pending"
     PARSED = "parsed"
     FAILED = "failed"
