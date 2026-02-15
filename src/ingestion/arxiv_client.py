@@ -30,14 +30,19 @@ class ArxivClient:
         )
 
     def fetch_recent_papers(self, days_back: int = 1) -> list[Paper]:
-        """Fetch papers published in the last N days for configured categories."""
+        """Fetch papers published in the last N days for configured categories.
+
+        Uses category-only queries sorted by submission date and filters
+        by date client-side, because the arXiv API's ``submittedDate``
+        range query is unreliable (often returns HTTP 500).
+        """
         papers: list[Paper] = []
-        date_from = datetime.now() - timedelta(days=days_back)
-        date_str = date_from.strftime("%Y%m%d")
+        cutoff = datetime.now() - timedelta(days=days_back)
+        seen_ids: set[str] = set()
 
         for category in self.categories:
-            query = f"cat:{category} AND submittedDate:[{date_str} TO *]"
-            logger.info("Fetching papers: %s", query)
+            query = f"cat:{category}"
+            logger.info("Fetching papers: %s  (cutoff: %s)", query, cutoff.date())
 
             search = arxiv.Search(
                 query=query,
@@ -47,8 +52,19 @@ class ArxivClient:
             )
 
             for result in self.client.results(search):
+                arxiv_id = result.entry_id.split("/")[-1]
+
+                # Skip duplicates across categories
+                if arxiv_id in seen_ids:
+                    continue
+                seen_ids.add(arxiv_id)
+
+                # Client-side date filter
+                if result.published and result.published.replace(tzinfo=None) < cutoff:
+                    continue
+
                 paper = Paper(
-                    arxiv_id=result.entry_id.split("/")[-1],
+                    arxiv_id=arxiv_id,
                     title=result.title,
                     abstract=result.summary,
                     categories=result.categories or [category],

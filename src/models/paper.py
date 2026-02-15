@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, HttpUrl
 
 
-class ParsingStatus(str, StrEnum):
+class ParsingStatus(StrEnum):
     PENDING = "pending"
     PARSED = "parsed"
     FAILED = "failed"

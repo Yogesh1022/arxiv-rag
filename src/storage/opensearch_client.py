@@ -134,11 +134,12 @@ class OpenSearchClient:
         top_k: int = 10,
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Execute hybrid search combining BM25 + kNN."""
-        must_clauses: list[dict[str, Any]] = [
-            {"match": {"content": {"query": query_text, "boost": 0.3}}},
-        ]
+        """Execute hybrid search combining BM25 + kNN.
 
+        Uses two separate queries (BM25 keyword + kNN vector) and merges
+        results via reciprocal-rank fusion to avoid nmslib engine limitations
+        with top-level ``knn`` syntax.
+        """
         filter_clauses: list[dict[str, Any]] = []
         if filters:
             if "categories" in filters:
@@ -146,28 +147,78 @@ class OpenSearchClient:
             if "date_from" in filters:
                 filter_clauses.append({"range": {"published_date": {"gte": filters["date_from"]}}})
 
-        search_body: dict[str, Any] = {
+        # ── Phase 1: BM25 keyword search ──────────────────────────
+        bm25_body: dict[str, Any] = {
             "size": top_k,
             "query": {
                 "bool": {
-                    "must": must_clauses,
+                    "must": [{"match": {"content": {"query": query_text}}}],
                     "filter": filter_clauses,
-                },
-            },
-            "knn": {
-                "embedding": {
-                    "vector": query_embedding,
-                    "k": top_k,
-                },
+                }
             },
         }
+        bm25_resp = self.client.search(index=self.index_name, body=bm25_body)
+        bm25_hits = bm25_resp["hits"]["hits"]
 
-        response = self.client.search(index=self.index_name, body=search_body)
-        return [
-            {
-                "chunk_id": hit["_id"],
-                "score": hit["_score"],
-                **hit["_source"],
+        # ── Phase 2: kNN vector search ────────────────────────────
+        knn_body: dict[str, Any] = {
+            "size": top_k,
+            "query": {
+                "knn": {
+                    "embedding": {
+                        "vector": query_embedding,
+                        "k": top_k,
+                    }
+                }
+            },
+        }
+        if filter_clauses:
+            knn_body["query"] = {
+                "bool": {
+                    "must": [
+                        {
+                            "knn": {
+                                "embedding": {
+                                    "vector": query_embedding,
+                                    "k": top_k,
+                                }
+                            }
+                        }
+                    ],
+                    "filter": filter_clauses,
+                }
             }
-            for hit in response["hits"]["hits"]
-        ]
+        knn_resp = self.client.search(index=self.index_name, body=knn_body)
+        knn_hits = knn_resp["hits"]["hits"]
+
+        # ── Reciprocal Rank Fusion (RRF) ──────────────────────────
+        rrf_k = 60  # standard RRF constant
+        scores: dict[str, float] = {}
+        docs: dict[str, dict] = {}
+
+        for rank, hit in enumerate(bm25_hits):
+            doc_id = hit["_id"]
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (rrf_k + rank + 1)
+            docs[doc_id] = hit
+
+        for rank, hit in enumerate(knn_hits):
+            doc_id = hit["_id"]
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (rrf_k + rank + 1)
+            docs[doc_id] = hit
+
+        # Sort by fused score, take top_k
+        ranked_ids = sorted(scores, key=lambda d: scores[d], reverse=True)[:top_k]
+
+        results = []
+        for doc_id in ranked_ids:
+            hit = docs[doc_id]
+            results.append(
+                {
+                    "chunk_id": doc_id,
+                    "score": scores[doc_id],
+                    **hit["_source"],
+                }
+            )
+
+        logger.info("Hybrid search returned %d results for: '%s'", len(results), query_text)
+        return results
